@@ -1,5 +1,5 @@
 process RENAME_VCF_HEADERS {
-    tag "${meta.sample}"
+    tag "${meta.id}"
     label 'process_single'
 
     conda "${moduleDir}/environment.yml"

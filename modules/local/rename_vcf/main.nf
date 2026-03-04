@@ -3,10 +3,11 @@ process RENAME_VCF {
     label 'process_single'
 
     input:
-      tuple val(meta), path(vcf), val(suffix)
+      tuple val(meta), path(vcf)
+      val(suffix)
 
     output:
-      tuple val(meta), path("${meta.id}_${suffix}.vcf")
+      tuple val(meta), path("${meta.id}_${suffix}.vcf"), emit: renamed_vcf
 
     when:
       task.ext.when == null || task.ext.when

@@ -1,0 +1,43 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://raw.githubusercontent.com/nf-core/ontvar/master/assets/schema_input.json",
+    "title": "nf-core/ontvar pipeline - params.input schema",
+    "description": "Schema for the file provided with params.input",
+    "type": "array",
+    "items": {
+    "type": "object",
+    "properties": {
+        "group_id": {
+            "type": "string",
+            "pattern": "^\\S+$",
+            "errorMessage": "Group ID must be provided and cannot contain spaces",
+            "meta": ["group_id"]
+        },
+        "sample_id": {
+            "type": "string",
+            "pattern": "^\\S+$",
+            "errorMessage": "Sample ID must be provided and cannot contain spaces",
+            "meta": ["id"]
+        },
+        "sample_type": {
+            "type": "string",
+            "enum": ["case", "control"],
+            "errorMessage": "Sample type must be either 'case' or 'control'",
+            "meta": ["status"]
+        },
+        "input_type": {
+            "type": "string",
+            "enum": ["fastq", "bam"],
+            "errorMessage": "Input type must be either 'fastq' or 'bam'",
+            "meta": ["input_type"]
+        },
+        "input_path": {
+            "type": "string",
+            "format": "string",
+            "pattern": "^\\S+$",
+            "errorMessage": "Path to FASTQ file/directory or BAM file must be provided and cannot contain spaces"
+        }
+    },
+    "required": ["group_id", "sample_id", "sample_type", "input_type", "input_path"]
+  }
+}

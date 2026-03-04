@@ -4,7 +4,7 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
 include { MULTIQC                } from '../modules/nf-core/multiqc/main'
-include { paramsSummaryMap       } from 'plugin/nf-schema'
+include { paramsSummaryMap  } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { softwareVersionsToYAML } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { methodsDescriptionText } from '../subworkflows/local/utils_nfcore_ontvar_pipeline'
@@ -12,8 +12,7 @@ include { CAT_FASTQ              } from '../modules/nf-core/cat/fastq/main'
 include { MINIMAP2_ALIGN         } from '../modules/nf-core/minimap2/align/main'
 include { SNIFFLES } from '../modules/nf-core/sniffles/main'
 include { CUTESV   } from '../modules/nf-core/cutesv/main'
-include { SEVERUS as SEVERUS_WITH_CONTROL } from '../modules/nf-core/severus/main'
-include { SEVERUS as SEVERUS_NO_CONTROL   } from '../modules/nf-core/severus/main'
+include { SEVERUS  } from '../modules/nf-core/severus/main'
 include { RENAME_VCF } from '../modules/local/rename_vcf/main'
 include { RENAME_VCF_HEADERS as RENAME_VCF_HEADERS_SNIFFLES } from '../modules/local/rename_vcf_headers/main'
 include { RENAME_VCF_HEADERS as RENAME_VCF_HEADERS_CUTESV   } from '../modules/local/rename_vcf_headers/main'
@@ -64,46 +63,47 @@ workflow ONTVAR {
     ch_versions = Channel.empty()
     ch_multiqc_files = Channel.empty()
 
-    ch_sample_info = ch_samplesheet
-    // ch_sample_info contains: [group_id, sample_id, sample_type, input_type, input_path]
-    //                          [   0    ,    1     ,     2      ,    3      ,     4     ]
-    
-    // Separate by input type
-    fastq_samples = ch_sample_info.filter { it[3] == 'fastq' }
-    bam_samples = ch_sample_info.filter { it[3] == 'bam' }
+   
 
+    ch_sample_info = ch_samplesheet
+    // ch_sample_info contains: [[group_id:group_id, id:sample_id, status:case|control, input_type:bam|fastq], input_path]
+    //                          [   [meta], input_path    ]
+    
+
+   ch_sample_info
+    .branch { meta, input_path ->
+        fastq_dir:  meta.input_type == 'fastq' && file(input_path).isDirectory()
+        fastq_file: meta.input_type == 'fastq'
+        bam:        meta.input_type == 'bam'
+    }
+     .set { ch_input }
     // ──────────────────────────────────────────────────────────────────────
     // FASTQ CONCATENATION (if multiple files per sample)
     // ──────────────────────────────────────────────────────────────────────
-    // Process directory inputs - collect FASTQ files
-    fastq_samples_dir = fastq_samples
-        .filter { it[4] && file(it[4]).isDirectory() }
-        .map { it ->
-            def group_id = it[0]
-            def sample_id = it[1]
-            def fastq_path = it[4]
-            def pattern = "${fastq_path}/*.{fastq,fq,fastq.gz,fq.gz}"
-            def fastqs = file(pattern)
-            tuple([id: "${group_id}", sample: sample_id], fastqs)
-        }
     
-    // Process single file inputs
-    fastq_samples_file = fastq_samples
-        .filter { it[4] && !file(it[4]).isDirectory() }
-        .map { it ->
-            def group_id = it[0]
-            def sample_id = it[1]
-            def fastq_path = it[4]
-            tuple([id: "${group_id}", sample: sample_id], file(fastq_path))
-        }
+    // If meta.input_type == fastq -> do concat (if dir) + alignment
+
+    // Add meta.single_end to cat fastq input to mimic nanopore fastq structure
+
+    ch_input_fastq_concat = ch_input.fastq_dir
+        .map { meta, input_path ->
+            def files = file("${input_path}/*.{fastq,fq,fastq.gz,fq.gz}", checkIfExists: true)
+            
+            return [meta + [single_end:true], files ]
+            }
 
     // Concatenate FASTQs from directories
-    CAT_FASTQ(fastq_samples_dir)
+    CAT_FASTQ(ch_input_fastq_concat)
+
+
+    
 
     // Merge concatenated and single-file FASTQs for minimap2
-    minimap2_input = CAT_FASTQ.out.reads
-        .mix(fastq_samples_file)
-    
+    minimap2_input = ch_input.fastq_file
+        .mix(CAT_FASTQ.out.reads)
+
+
+
     // ──────────────────────────────────────────────────────────────────────
     // ALIGNMENT (minimap2 for long-read sequencing)
     // ──────────────────────────────────────────────────────────────────────
@@ -117,133 +117,114 @@ workflow ONTVAR {
         Channel.value(true) 
     )
 
-    // Merge aligned and original BAMs with sample_id as key
-    aligned_bams = MINIMAP2_ALIGN.out.bam
+
+    ch_bam = MINIMAP2_ALIGN.out.bam.mix(ch_input.bam)
+
+
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Prepare SV input
+    // ──────────────────────────────────────────────────────────────────────
+
+
+    ch_cases = ch_bam
+        .filter { meta, bam -> meta.status == 'case' }
+    
+    ch_controls = ch_bam
+        .filter {meta, bam -> meta.status == 'control' }
         .map { meta, bam ->
-            def sample_id = meta.id
-            tuple(sample_id, bam)
+            tuple(meta.group_id, meta, bam)
+        }
+
+    sniffles_cutesv_input = ch_cases
+        .map { meta, bam ->
+            def bai = file("${bam}.bai")
+            tuple (meta, bam, bai)
         }
     
-    original_bams = bam_samples
-        .map { it ->
-            def sample_id = it[1]  // sample_id is index 1
-            def bam_path = it[4]
-            tuple(sample_id, file(bam_path))
+    ch_cases_grouped = ch_cases
+        .map {meta, bam ->
+            tuple(meta.group_id, meta, bam)
         }
 
-    // Merge aligned and original BAMs (keyed by sample_id)
-    all_bams = aligned_bams.mix(original_bams)
+    severus_input = ch_cases_grouped
+        .join(ch_controls, by: 0, remainder: true)
+        .map { it -> 
+                // it[0] = group_id
+                // it[1] = case_meta
+                // it[2] = case_bam
 
-    // Map cases and controls with sample_id, then join
-    cases_with_bams = ch_sample_info
-        .filter { it[2] == 'case' }
-        .map { it -> tuple(it[1], it[0]) }  // [sample_id, group_id]
-        .join(all_bams, by: 0)               // [sample_id, group_id, bam]
-        .map { sample_id, group_id, bam ->
-            tuple(group_id, bam)             // [group_id, bam]
-        }
+                def meta = it[1]
+                def case_bam = it[2]
+                def case_bai = file("${case_bam}.bai")
 
-    controls_with_bams = ch_sample_info
-        .filter { it[2] == 'control' }
-        .map { it -> tuple(it[1], it[0]) }  // [sample_id, group_id]
-        .join(all_bams, by: 0)               // [sample_id, group_id, bam]
-        .map { sample_id, group_id, bam ->
-            tuple(group_id, bam)             // [group_id, bam]
-        }
+                def ctrl_bam = (it.size() == 5) ? it[4] : null
 
-    sv_input = cases_with_bams
-        .join(controls_with_bams, by: 0, remainder: true)
-        .map { group_id, case_bam, control_bam ->
-            tuple(group_id, case_bam, control_bam ?: null)
-        }
+                def input_ctrl_bam = ctrl_bam ?: []
+                def input_ctrl_bai = ctrl_bam ? file("${ctrl_bam}.bai") : []
 
-    // ──────────────────────────────────────────────────────────────────────
-    // SV Calling
-    // ──────────────────────────────────────────────────────────────────────
-
-    // SNIFFLES
-    sniffles_input = sv_input
-        .map { it ->
-            def group_id = it[0]
-            tuple([id: "${group_id}", sample: group_id], it[1], file("${it[1]}.bai"))
-        }
-
+                tuple(meta, case_bam, case_bai, input_ctrl_bam, input_ctrl_bai, [])
+                
+                }
+    
     SNIFFLES(
-        sniffles_input,                                                         // Input 1: [meta, bam, bai]
+        sniffles_cutesv_input,                                               // Input 1: [meta, bam, bai]
         Channel.value(tuple([id: "reference"], file(reference))),               // Input 2: [meta, fasta]
         Channel.value(tuple([id: "tandem"], file(params.tandem_repeats))),      // Input 3: [meta, tandem_file]
         Channel.value(true),                                                    // Input 4: vcf_output
         Channel.value(false)                                                    // Input 5: snf_output
     )
 
-    // CUTESV
-    cutesv_input = sv_input
-        .map { it ->
-            def group_id = it[0]
-            tuple([id: "${group_id}", sample: group_id], it[1], file("${it[1]}.bai"))
-        }
-
     CUTESV(
-        cutesv_input,
+        sniffles_cutesv_input,
         Channel.value(tuple([id: "reference"], file(reference)))
     )
 
-    // SEVERUS
-    severus_with_control_input = sv_input.filter { it[2] }
-        .map { it ->
-            def group_id = it[0]
-            def case_bam = it[1]
-            def control_bam = it[2]
-            tuple([id: "${group_id}", sample: "${group_id}", has_control: true, control_bam: control_bam], case_bam, file("${case_bam}.bai"), control_bam, file("${control_bam}.bai"), [])
-        }
-
-    severus_no_control_input = sv_input.filter { !it[2] }
-        .map { it ->
-            def group_id = it[0]
-            def case_bam = it[1]
-            tuple([id: "${group_id}", sample: "${group_id}", has_control: false], case_bam, file("${case_bam}.bai"), [], [], [])
-        }
-
-    SEVERUS_WITH_CONTROL(
-        severus_with_control_input,                                             // Input 1: [meta, target_bam, target_bai, control_bam, control_bai, vcf]
-        Channel.value(tuple([id: "vntr"], file(params.vntr_bed)))               // Input 2: [meta, vntr_bed]
+    SEVERUS(
+        severus_input,
+        Channel.value(tuple([id: "vntr"], file(params.vntr_bed)))
     )
 
-    SEVERUS_NO_CONTROL(
-        severus_no_control_input,                                               // Input 1: [meta, target_bam, target_bai, control_bam, control_bai, vcf]
-        Channel.value(tuple([id: "vntr"], file(params.vntr_bed)))               // Input 2: [meta, vntr_bed]
-    )
 
-    severus_vcfs = SEVERUS_WITH_CONTROL.out.somatic_vcf
-        .mix(SEVERUS_NO_CONTROL.out.somatic_vcf)
-        .map { meta, vcf ->
-            tuple(meta, vcf, 'severus')
-        } | RENAME_VCF
 
     // ──────────────────────────────────────────────────────────────────────
     // FIX SAMPLE NAMES in VCF HEADERS
     // ──────────────────────────────────────────────────────────────────────
 
-    sniffles_renamed_vcfs = SNIFFLES.out.vcf
-        .map { meta, vcf -> tuple(meta, vcf) } | RENAME_VCF_HEADERS_SNIFFLES
+    RENAME_VCF_HEADERS_SNIFFLES(
+        SNIFFLES.out.vcf
+    )
+    RENAME_VCF_HEADERS_CUTESV(
+        CUTESV.out.vcf
+    )
 
-    cutesv_renamed_vcfs = CUTESV.out.vcf
-        .map { meta, vcf -> tuple(meta, vcf) } | RENAME_VCF_HEADERS_CUTESV
 
-    severus_renamed_vcfs = severus_vcfs
-        .map { meta, vcf -> tuple(meta, vcf) } | RENAME_VCF_HEADERS_SEVERUS
+    ch_severus_outputs = SEVERUS.out.all_vcf
+        .join( SEVERUS.out.somatic_vcf, remainder: true )
 
-    all_caller_vcfs = sniffles_renamed_vcfs.mix(cutesv_renamed_vcfs, severus_renamed_vcfs)
-        .map { meta, vcf -> tuple(meta, vcf) }
+    ch_severus_final_out = ch_severus_outputs
+        .map { meta, all_vcf, somatic_vcf ->
+            def vcf_to_use = somatic_vcf ? somatic_vcf : all_vcf
 
-    // Raw caller summaries
-    all_caller_vcfs_for_summary = all_caller_vcfs
-        .map { meta, vcf -> vcf }
-        .collect()
-        .map { vcf_list -> tuple([id: "raw_caller_summary"], vcf_list) }
+            tuple( meta, vcf_to_use )
+        }
+
+    RENAME_VCF(
+        ch_severus_final_out,
+        'severus'
+    )
+    
+    RENAME_VCF_HEADERS_SEVERUS(
+        RENAME_VCF.out.renamed_vcf
+    )
+
+    ch_all_caller_vcfs = RENAME_VCF_HEADERS_SNIFFLES.out.mix(
+        RENAME_VCF_HEADERS_CUTESV.out, RENAME_VCF_HEADERS_SEVERUS.out
+    )
+    .groupTuple(by:0, size:3)
 
     SUMMARIZE_CALLERS(
-        all_caller_vcfs_for_summary,
+        ch_all_caller_vcfs,
         Channel.value("raw_calls")
     )
 
@@ -251,28 +232,16 @@ workflow ONTVAR {
         SUMMARIZE_CALLERS.out.json
             .map { meta, json -> tuple([id: "raw_callers_plot"], [json]) },
         Channel.value("Raw Caller SV Counts")
-    )
-
-    // ──────────────────────────────────────────────────────────────────────
-    // Gather SV caller outputs per sample
-    // ──────────────────────────────────────────────────────────────────────
-
-    sv_calls_by_sample = all_caller_vcfs
-        .map { meta, vcf ->
-            def group_id = meta.sample ?: meta.id  // Use sample field first, fallback to id
-            tuple(group_id, vcf)
-        }
-        .groupTuple(by: 0)
+    ) 
 
     // ──────────────────────────────────────────────────────────────────────
     // Run Jasmine to merge SVs from callers per sample
     // ──────────────────────────────────────────────────────────────────────
 
-    jasminesv_sample_input = sv_calls_by_sample
-        .filter { meta, vcf_list -> vcf_list.size() > 0 }
+
+    ch_jasminesv_input = ch_all_caller_vcfs
         .map { meta, vcf_list ->
-            def group_id = meta
-            tuple([id: group_id, sample: group_id, step: "consensus"], vcf_list, [], [])
+            tuple( meta, vcf_list, [], [])
         }
 
     // Prepare Jasmine input channels (per-sample)
@@ -281,11 +250,21 @@ workflow ONTVAR {
     ch_jasmine_sample_chr_norm  = Channel.value([]) // No chr norm file
 
     JASMINESV_SAMPLE(
-        jasminesv_sample_input,
+        ch_jasminesv_input,
         ch_jasmine_sample_reference,
         ch_jasmine_sample_fai,
         ch_jasmine_sample_chr_norm
     )
+
+    emit:
+        multiqc_report         = ch_multiqc_files
+        versions               = ch_versions    
+}
+
+/*
+
+
+
 
     jasminesv_sample_sources = jasminesv_sample_input
         .map { meta, vcf_list, bams, sample_dists -> tuple(meta.sample ?: meta.id, vcf_list) }
