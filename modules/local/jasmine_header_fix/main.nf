@@ -1,6 +1,6 @@
 
 process JASMINE_HEADER_FIX {
-    tag "${meta.sample}"
+    tag "${meta.id}"
     label 'process_low'
 
     conda "${moduleDir}/environment.yml"
@@ -19,7 +19,7 @@ process JASMINE_HEADER_FIX {
         tuple val(meta), path(jasmine_vcf), val(src_vcfs)
 
     output:
-        tuple val(meta), path("${meta.sample}.jasmine.fixed.vcf.gz"), emit: vcf
+        tuple val(meta), path("${meta.id}.jasmine.fixed.vcf.gz"), emit: vcf
 
     when:
       task.ext.when == null || task.ext.when
@@ -39,7 +39,7 @@ process JASMINE_HEADER_FIX {
     export TMPDIR=\$PWD/tmp
 
     in_vcf='${jasmine_vcf}'
-    out_vcf='${meta.sample}.jasmine.fixed.vcf.gz'
+    out_vcf='${meta.id}.jasmine.fixed.vcf.gz'
     hdr_tmp=all_headers.tmp
     jasmine_hdr=jasmine_headers.tmp
     hdr_union=hdr_union.tmp

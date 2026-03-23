@@ -43,6 +43,7 @@ include { BCFTOOLS_VIEW as CALLER_SUPPORT_FILTER } from '../modules/nf-core/bcft
 include { BCFTOOLS_VIEW as AF_FILTER } from '../modules/nf-core/bcftools/view/main'
 include { BCFTOOLS_VIEW as AF_FILTER_COHORT } from '../modules/nf-core/bcftools/view/main'
 include { BCFTOOLS_SORT as SORT_VCF } from '../modules/nf-core/bcftools/sort/main'
+include { BCFTOOLS_SORT as SORT_SVDB} from '../modules/nf-core/bcftools/sort/main'
 
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -256,72 +257,33 @@ workflow ONTVAR {
         ch_jasmine_sample_chr_norm
     )
 
-    emit:
-        multiqc_report         = ch_multiqc_files
-        versions               = ch_versions    
-}
+    ch_jasmine_header_fix = JASMINESV_SAMPLE.out.vcf.join(ch_all_caller_vcfs)
+    
+    JASMINE_HEADER_FIX(ch_jasmine_header_fix)
 
-/*
+    FILTER_CHR(JASMINE_HEADER_FIX.out.vcf)
 
-
-
-
-    jasminesv_sample_sources = jasminesv_sample_input
-        .map { meta, vcf_list, bams, sample_dists -> tuple(meta.sample ?: meta.id, vcf_list) }
-
-    jasminesv_sample_out_keyed = JASMINESV_SAMPLE.out.vcf
-        .map { meta, vcf -> tuple(meta.sample ?: meta.id, tuple(meta, vcf)) }
-
-    jasminesv_sample_out_keyed
-        .join(jasminesv_sample_sources)
-        .map { sample, leftVal, src_vcfs ->
-            def (meta, vcf) = leftVal
-            tuple(meta, vcf, src_vcfs)
-        } | JASMINE_HEADER_FIX
-
-    ch_jasmine_sample_vcfs = JASMINE_HEADER_FIX.out.vcf
-    .map { meta, vcf -> tuple(meta, vcf) }
-
-    sample_filtered = ch_jasmine_sample_vcfs | FILTER_CHR
-
-    sample_filtered | SORT_VCF
-    sample_sorted = SORT_VCF.out.vcf
+    SORT_VCF(FILTER_CHR.out)
 
     // ──────────────────────────────────────────────────────────────────────
     // Filter SVs supported by ≥2 callers
     // ──────────────────────────────────────────────────────────────────────
 
-    bcftools_sample_input = sample_sorted
-    .map { meta, vcf ->
-        def v = vcf.toString()
-        def updated_meta = [id: meta.sample ?: meta.id, sample: meta.sample ?: meta.id, step: "caller_support"]
-        def idx = file(v + '.csi')
-        if( !idx.exists() ) idx = file(v + '.tbi')
-        def idx_out = idx.exists() ? idx : []
-        tuple(updated_meta, file(v), idx_out)
-    }
-
+    bcftools_view_input = SORT_VCF.out.vcf.join(SORT_VCF.out.csi)
     CALLER_SUPPORT_FILTER(
-        bcftools_sample_input,
-        Channel.value([]), // regions
-        Channel.value([]), // targets
-        Channel.value([])  // samples
+        bcftools_view_input,
+        [], // regions
+        [], // targets
+        [] // samples
     )
 
-    // Consensus summary - simple approach
-    consensus_summary_input = CALLER_SUPPORT_FILTER.out.vcf
-        .map { meta, vcf -> vcf }
-        .collect()
-        .map { vcf_list -> tuple([id: "consensus_summary"], vcf_list) }
-
     SUMMARIZE_CALLER_MERGED(
-        consensus_summary_input,
+        CALLER_SUPPORT_FILTER.out.vcf,
         Channel.value("consensus")
     )
 
     PLOT_CONSENSUS(
-        SUMMARIZE_CALLER_MERGED.out.json
-            .map { meta, json -> tuple([id: "consensus_plot"], [json]) },
+        SUMMARIZE_CALLER_MERGED.out.json,
         Channel.value("Consensus SV Counts")
     )
 
@@ -329,8 +291,6 @@ workflow ONTVAR {
     // SAMPLE LEVEL AF ANNOTATION + FILTERING + ANNOTSV ANNOTATION
     // ──────────────────────────────────────────────────────────────────────
 
-    ch_per_sample_input = CALLER_SUPPORT_FILTER.out.vcf
-        .map { meta, vcf -> tuple(meta, vcf) }
 
     ch_svdb_in_occ  = Channel.value(params.svdb_in_occ ?: [])
     ch_svdb_in_frq  = Channel.value(params.svdb_in_frq ?: [])
@@ -338,9 +298,9 @@ workflow ONTVAR {
     ch_svdb_out_frq = Channel.value(params.svdb_out_frq ?: [])
     ch_svdb_dbs     = Channel.value(params.svdb_databases ? params.svdb_databases.collect { file(it) } : [])
     ch_svdb_bedpe   = Channel.value([])
-
+    
     SVDB_QUERY_SAMPLE(
-        ch_per_sample_input,
+        CALLER_SUPPORT_FILTER.out.vcf,
         ch_svdb_in_occ,
         ch_svdb_in_frq,
         ch_svdb_out_occ,
@@ -349,40 +309,24 @@ workflow ONTVAR {
         ch_svdb_bedpe
     )
 
-    ch_per_sample_bcftools_input = SVDB_QUERY_SAMPLE.out.vcf
-    .map { meta, annotated_vcf ->
-        def updated_meta = [id: meta.sample ?: meta.id, sample: meta.sample ?: meta.id, step: "af_filter"]
-        def idx = file(annotated_vcf.toString() + '.csi')
-        if( !idx.exists() ) idx = file(annotated_vcf.toString() + '.tbi')
-        def idx_out = idx.exists() ? idx : []
-        tuple(updated_meta, file(annotated_vcf), idx_out)
-    }
 
-    ch_bcftools_regions = Channel.value([])
-    ch_bcftools_targets = Channel.value([])
-    ch_bcftools_samples = Channel.value([])
+    SORT_SVDB(SVDB_QUERY_SAMPLE.out.vcf)
+    ch_svdb_vcf = SORT_SVDB.out.vcf.join(SORT_SVDB.out.csi)
 
     AF_FILTER(
-        ch_per_sample_bcftools_input,
-        ch_bcftools_regions,
-        ch_bcftools_targets,
-        ch_bcftools_samples
+        ch_svdb_vcf,
+        [], // regions
+        [], // targets
+        [] // samples
     )
 
-    // Filtered summary - simple approach
-    filtered_summary_input = AF_FILTER.out.vcf
-        .map { meta, vcf -> vcf }
-        .collect()
-        .map { vcf_list -> tuple([id: "filtered_summary"], vcf_list) }
-
     SUMMARIZE_CALLER_MERGED_FILTERED(
-        filtered_summary_input,
+        AF_FILTER.out.vcf,
         Channel.value("filtered")
     )
 
     PLOT_FILTERED(
-        SUMMARIZE_CALLER_MERGED_FILTERED.out.json
-            .map { meta, json -> tuple([id: "filtered_plot"], [json]) },
+        SUMMARIZE_CALLER_MERGED_FILTERED.out.json,
         Channel.value("Filtered SV Counts")
     )
 
@@ -408,6 +352,7 @@ workflow ONTVAR {
         }
     }
 
+
     ch_candidate_genes      = Channel.value(tuple([id: "candidate_genes"], []))
     ch_false_positive_snv   = Channel.value(tuple([id: "false_positive_snv"], []))
     ch_gene_transcripts     = Channel.value(tuple([id: "gene_transcripts"], []))
@@ -424,14 +369,14 @@ workflow ONTVAR {
         ch_false_positive_snv,
         ch_gene_transcripts
     )
-
+/*
     ANNOTSV_PER_SAMPLE(
         AF_FILTER.out.vcf
             .map { meta, vcf ->
-                def updated_meta = [
-                    id: "${meta.sample ?: meta.id}_filtered",
-                    sample: meta.sample ?: meta.id, 
-                    step: "final_annotation"
+                def updated_meta =  meta.clone()
+                    updated_meta.id = "${meta.sample ?: meta.id}_filtered"
+                    updated_meta.sample = ${meta.sample ?: meta.id}
+                    updated_meta.step = "final_annotation"
                 ]
                 tuple(updated_meta, vcf, [], [])
             },
@@ -440,6 +385,22 @@ workflow ONTVAR {
         ch_false_positive_snv,
         ch_gene_transcripts
     )
+
+*/
+    emit:
+        multiqc_report         = ch_multiqc_files
+        versions               = ch_versions    
+}
+
+/*
+
+
+
+
+
+
+
+
 
     // ──────────────────────────────────────────────────────────────────────
     // Continue to cohort-level analyses

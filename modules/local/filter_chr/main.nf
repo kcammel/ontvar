@@ -1,5 +1,5 @@
 process FILTER_CHR {
-    tag "${meta.sample}"
+    tag "${meta.id}"
 
     label 'process_low'
 
